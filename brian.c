@@ -4,13 +4,25 @@
 #include "stdarg.h"
 #include "stdio.h"
 
+#define LAYER_ACTIVATION(func_name) void layer_ ## func_name (Layer* layer) {\
+    for (int i = 0; i < layer->output_count; ++i)\
+        layer->activated_neurons[i] = func_name (layer->unactivated_neurons[i]);\
+}\
+void layer_ ## func_name ## _p (Layer* layer) {\
+    for (int i = 0; i < layer->output_count; ++i)\
+        layer->primed_neurons[i] = func_name ## _prime (layer->unactivated_neurons[i]);\
+}
+
+
 double tanh_prime(double x) {
     return 1 - tanh(x) * tanh(x); 
 }
 
+LAYER_ACTIVATION(tanh);
+
 Activation TANH = {
-    .func = tanh,
-    .prime = tanh_prime
+    .func = layer_tanh,
+    .prime = layer_tanh_p
 };
 
 double leaky_relu(double x) {
@@ -21,9 +33,11 @@ double leaky_relu_prime(double x) {
     return (x > 0) * 1 + 0.1 * (x < 0); 
 }
 
+LAYER_ACTIVATION(leaky_relu);
+
 Activation LEAKY_RELU = {
-    .func = leaky_relu,
-    .prime = leaky_relu_prime
+    .func = layer_leaky_relu,
+    .prime = layer_leaky_relu_p
 };
 
 double lin(double x) {
@@ -34,9 +48,55 @@ double lin_prime(double x) {
     return 1;
 }
 
+LAYER_ACTIVATION(lin);
+
 Activation LINEAR = {
-    .func = lin,
-    .prime = lin_prime
+    .func = layer_lin,
+    .prime = layer_lin_p
+};
+
+double sigmoid(double x) {
+    return exp(x) / (1 + exp(x));
+}
+
+double sigmoid_prime(double x) {
+    return sigmoid(x) * (1 - sigmoid(x));
+}
+
+LAYER_ACTIVATION(sigmoid);
+
+Activation SIGMOID = {
+    .func = layer_sigmoid,
+    .prime = layer_sigmoid_p
+};
+
+void softmax(Layer* layer) {
+    double denominator = 0;
+    for (int i = 0; i < layer->output_count; ++i)
+        denominator += exp(layer->unactivated_neurons[i]);
+    
+    for (int i = 0; i < layer->output_count; ++i)
+        layer->activated_neurons[i] = exp(layer->unactivated_neurons[i]) / denominator;
+}
+
+double* curr_y;
+void softmax_p(Layer* layer) {
+    for (int i = 0; i < layer->output_count; ++i) {
+        layer->primed_neurons[i] = 1; 
+    }
+}
+
+Activation SOFTMAX = {
+    .func = softmax,
+    .prime = softmax_p
+};
+
+Activation* ACTIVATION_TABLE[512] = {
+    &TANH,
+    &LEAKY_RELU,
+    &SIGMOID,
+    &LINEAR,
+    &SOFTMAX
 };
 
 double cost(double* x, double* y, int count) {
@@ -48,12 +108,8 @@ double cost(double* x, double* y, int count) {
     return loss * 0.5;
 }
 
-double cost_prime(double* x, double* y, int count) {
-    double loss = 0;
-    for (int i = 0; i < count; ++i) {
-        loss += x[i] - y[i];
-    }
-    return loss;
+double cost_prime(double x, double y) {
+    return x - y;
 }
 
 Layer* new_layer(int input_count, int output_count, Activation* activation) {
@@ -82,6 +138,7 @@ Layer* new_layer(int input_count, int output_count, Activation* activation) {
 
     layer->unactivated_neurons = malloc(sizeof(double) * output_count);
     layer->activated_neurons = malloc(sizeof(double) * output_count);
+    layer->primed_neurons = malloc(sizeof(double) * output_count);
 
     layer->activation = activation;
     return layer;
@@ -122,8 +179,8 @@ void layer_forward(Layer* layer, double* inputs) {
         for (int i = 0; i < layer->input_count; ++i) {
             layer->unactivated_neurons[j] += inputs[i] * GET_WEIGHT(layer, i, j);
         }
-        layer->activated_neurons[j] = layer->activation->func(layer->unactivated_neurons[j]);
     }
+    layer->activation->func(layer);
 }
 
 double* nn_forward(NN* nn, double* inputs) {
@@ -140,8 +197,8 @@ void train(NN *nn, int data_len, int data_instance_len, double* xs, double* ys, 
     int i = 0;
     for (int epoch = 0; epoch < epochs; ++epoch) {
         
-        if (epoch % 1000 == 0) {
-            printf("EPOCH %d\n", epoch);
+        if (epoch % 100 == 0) {
+            printf("EPOCH %d WITH LOSS %lf\n", epoch, get_loss(nn, xs, ys, data_len));
         }
 
         // reset total changes
@@ -157,6 +214,9 @@ void train(NN *nn, int data_len, int data_instance_len, double* xs, double* ys, 
             double* x = xs + data_instance_len * i + di * nn->input_count;
             double* y = ys + data_instance_len * i + di * nn->output_count;            
             
+            if ((x + nn->input_count) >= xs + data_len)
+                break;
+
             train_one(nn, x, y);
         }
 
@@ -177,12 +237,14 @@ void train(NN *nn, int data_len, int data_instance_len, double* xs, double* ys, 
 }
 
 void train_one(NN* nn, double* x, double* y) {
+    curr_y = y;
     nn_forward(nn, x);
     // all the last biases and weights
     Layer* last_layer = nn->layers[nn->layer_count - 2];
-    double dloss = cost_prime(last_layer->activated_neurons, y, nn->output_count);
+    last_layer->activation->prime(last_layer);
+
     for (int i = 0; i < nn->output_count; ++i) {
-        last_layer->bias_changes[i] = dloss * last_layer->activation->prime(last_layer->unactivated_neurons[i]); 
+        last_layer->bias_changes[i] = cost_prime(last_layer->activated_neurons[i], y[i]) * last_layer->primed_neurons[i]; 
     }
 
     for (int w = 0; w < last_layer->input_count * last_layer->output_count; ++w) {
@@ -196,13 +258,15 @@ void train_one(NN* nn, double* x, double* y) {
     // I w1 b1 w2 b2 C
     for (int i = nn->layer_count - 3; i >= 0; --i) {
         Layer* layer = nn->layers[i];
+        layer->activation->prime(layer);
+
         for (int b = 0; b < layer->output_count; ++b) {
             layer->bias_changes[b] = 0; 
             for (int b_prev = 0; b_prev < nn->layers[i + 1]->output_count; ++b_prev) {
                 double db_prev = nn->layers[i + 1]->bias_changes[b_prev];
                 layer->bias_changes[b] += db_prev * GET_WEIGHT(nn->layers[i + 1], b, b_prev); 
             }
-            layer->bias_changes[b] *= layer->activation->prime(layer->unactivated_neurons[b]); 
+            layer->bias_changes[b] *= layer->primed_neurons[b]; 
         }
         for (int w = 0; w < layer->input_count * layer->output_count; ++w) {
             int input_index = w % layer->input_count;
@@ -227,4 +291,71 @@ void train_one(NN* nn, double* x, double* y) {
         for (int w = 0; w < layer->input_count * layer->output_count; ++w)
             layer->total_weight_changes[w] += layer->weight_changes[w];
     }
+}
+
+int get_activation_code(Activation* activation) {
+    for (int i = 0; i < sizeof(ACTIVATION_TABLE); ++i) {
+        if (ACTIVATION_TABLE[i] == activation) return i;
+    }
+    return -1;
+}
+
+void save_nn(NN* nn, FILE* file) {
+    // layout: 
+    // layer_count: <INT>
+    // input_layer_size <INT>
+    // layers: <layer_count many>
+    // -layer_output_size: <INT>
+    // -activation: <INT>
+    // -layer_weights: <DOUBLE>
+    // -layer_biases: <DOUBLE>
+    fwrite(&nn->layer_count, sizeof(int), 1, file);
+    fwrite(&nn->input_count, sizeof(int), 1, file);
+
+    for (int i = 0; i < nn->layer_count - 1; ++i) {
+        Layer* layer = nn->layers[i];
+        fwrite(&layer->output_count, sizeof(int), 1, file);
+        int activation_code = get_activation_code(layer->activation);
+        fwrite(&activation_code, sizeof(int), 1, file);
+        fwrite(layer->weights, sizeof(double), layer->input_count * layer->output_count, file);
+        fwrite(layer->biases, sizeof(double), layer->output_count, file);
+    }
+}
+
+NN* load_nn(FILE* file) {
+    NN* nn = malloc(sizeof(NN));
+
+    fread(&nn->layer_count, sizeof(int), 1, file);
+    nn->layer_sizes = malloc(sizeof(int) * nn->layer_count);
+    nn->layers = malloc(sizeof(Layer*) * (nn->layer_count - 1));
+
+    fread(&nn->input_count, sizeof(int), 1, file);
+    nn->layer_sizes[0] = nn->input_count;
+
+    for (int i = 1; i < nn->layer_count; ++i) {
+        fread(&nn->layer_sizes[i], sizeof(int), 1, file); 
+        int activation_code;
+        fread(&activation_code, sizeof(int), 1, file);
+        Activation* activation = ACTIVATION_TABLE[activation_code]; 
+        nn->layers[i - 1] = new_layer(nn->layer_sizes[i - 1], nn->layer_sizes[i], activation); 
+
+        Layer* layer = nn->layers[i - 1];
+        fread(layer->weights, sizeof(double), layer->input_count * layer->output_count, file);
+        fread(layer->biases, sizeof(double), layer->output_count, file);
+    }
+
+    nn->output_count = nn->layer_sizes[nn->layer_count - 1];
+
+    return nn;
+}
+
+double get_loss(NN* nn, double* xs, double* ys, int dataset_size) {
+    double loss = 0;
+    for (int i = 0; i < dataset_size; ++i) {
+        double* inputs = &xs[i * nn->input_count];
+        double* output = nn_forward(nn, inputs); 
+        double* y = &ys[i * nn->output_count];
+        loss += cost(output, y, nn->output_count);
+    }
+    return loss / dataset_size;
 }

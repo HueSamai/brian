@@ -30,7 +30,7 @@ int main_sin() {
     );
     printf("Created nn!\n");
 
-    int data_len = 100;
+    int data_len = 99;
     double xs[data_len];
     double ys[data_len];
 
@@ -106,7 +106,38 @@ int main_xor() {
     return 0;
 }
 
+int main_prob() {
+    time_t t;
+    time(&t);
+    srand((double)t);
+
+    NN* nn = new_nn(3, 
+        2,
+        10, &LEAKY_RELU,
+        3, &SOFTMAX
+    );
+
+    int data_len = 100;
+    double xs[data_len * 2];
+    double ys[data_len * 3];
+
+    for (int i = 0; i < data_len; ++i) {
+        xs[i * 2] = (double)rand() / (double)RAND_MAX;
+        xs[i * 2 + 1] = (double)rand() / (double)RAND_MAX;
+        ys[i * 3] = (double)(xs[i] > xs[i + 1]);
+        ys[i * 3 + 1] = (double)(xs[i] < xs[i + 1]);
+        ys[i * 3 + 2] = (double)(xs[i] == xs[i + 1]);
+    }
+    print_loss(nn, data_len, xs, ys);
+    printf("Training!\n");
+    train(nn, data_len, data_len, xs, ys, 99999, 5e-1);
+    print_loss(nn, data_len, xs, ys);
+
+    return 0;
+}
+
 int main() {
+    return main_prob();
     return main_sin();
     //return main_xor();
     return 0;
